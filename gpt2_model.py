@@ -1,0 +1,202 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dataclasses import dataclass
+
+@dataclass
+class GPT2Config:
+    """
+    Configuration for GPT-2 model.
+    Note this is the 124M parameter version (not 1.5B).
+    """
+    vocab_size: int = 50257 # GPT-2 vocabulary size: 50000 BPE tokens + 256 bytes tokens + 1 <\endoftext> token
+    block_size: int = 1024 # max sequence length
+    n_layer: int = 12 # number of transformer blocks
+    n_head: int = 12 # number of attention heads
+    n_embd: int = 768 # embedding dimension
+    # dropout: float = 0.1 # dropout rate
+
+class CausalSelfAttention(nn.Module):
+    """GPT-2 Causal Self Attention"""
+    def __init__(self, config: GPT2Config):
+        super().__init__()
+        self.config = config
+        # query, key, value projections in one batch, W_q, W_k, W_v
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        # output projection, W_o
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        # self.dropout = nn.Dropout(config.dropout)
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape # B: batch size, T: sequence length, C: embedding dimension
+        qkv = self.c_attn(x) # (B, T, 3 * C)
+        q, k, v = qkv.split(C, dim=2) # (B, T, C), (B, T, C), (B, T, C)
+        # split into multiple heads 
+        # (B, T, C) -> (B, T, n_head, C // n_head) -> (B, n_head, T, C // n_head) -> (B, n_head, T, head_dim)
+        head_dim = C // self.config.n_head
+        q = q.view(B, T, self.config.n_head, head_dim).transpose(1, 2)
+        k = k.view(B, T, self.config.n_head, head_dim).transpose(1, 2)
+        v = v.view(B, T, self.config.n_head, head_dim).transpose(1, 2)
+        # S = QK^T / sqrt(d_k)
+        attn = (q @ k.transpose(-2, -1)) * (head_dim ** -0.5) # (B, n_head, T, T)
+        # causal mask : cannot look into the future tokens
+        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # (B, n_head, T, T)
+        # P = softmax(S)
+        attn = F.softmax(attn, dim=-1) # (B, n_head, T, T)
+        # O = PV
+        out = attn @ v # (B, n_head, T, head_dim)
+        # concatenate heads
+        out = out.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C) concat
+        # output projection
+        out = self.c_proj(out) # (B, T, C) W_o
+        return out
+
+class MLP(nn.Module):
+    """GPT-2 MLP"""
+    def __init__(self, config: GPT2Config):
+        super().__init__()
+        self.config = config
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        # self.dropout = nn.Dropout(config.dropout)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.c_fc(x)
+        x = F.gelu(x) # GELU activation https://docs.pytorch.org/docs/stable/generated/torch.nn.GELU.html
+        x = self.c_proj(x)
+        # x = self.dropout(x)
+        return x
+
+class Block(nn.Module):
+    """GPT-2 Transformer Block"""
+    def __init__(self, config: GPT2Config):
+        super().__init__()
+        self.config = config
+        self.attn = CausalSelfAttention(config)
+        self.mlp = MLP(config)
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+class GPT2(nn.Module):
+    """GPT-2 Model"""
+    
+    def __init__(self, config: GPT2Config):
+        super().__init__()
+        self.config = config
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # drop = nn.Dropout(config.dropout),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # weight tying with wte
+        self.lm_head.weight = self.transformer.wte.weight
+        
+
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass"""
+        B, T = idx.shape
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is {self.config.block_size}"
+        pos = torch.arange(T, device=idx.device)
+        pos_emb = self.transformer.wpe(pos) # (T, C)
+        tok_emb = self.transformer.wte(idx) # (B, T, C)
+        x = tok_emb + pos_emb # (B, T, C)
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x) # (B, T, C)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+        return logits
+
+    @classmethod
+    def from_pretrained(cls, model_name: str) -> 'GPT2':
+        """Load pre-trained GPT-2 model from Hugging Face"""
+        assert model_name in ['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl']
+        from transformers import GPT2LMHeadModel
+        print(f"Loading weights from {model_name}...")
+        
+        config_args = {
+            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),
+            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024),
+            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280),
+            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600),
+        }[model_name]
+        config_args['vocab_size'] = 50257
+        config_args['block_size'] = 1024
+        # config_args['dropout'] = 0.1
+
+        config = GPT2Config(**config_args)
+        model = GPT2(config)
+
+        sd = model.state_dict()
+        sd_keys = sd.keys()
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # skip the bias parameter in the attention layer
+
+        # load weights from huggingface
+        hf_model = GPT2LMHeadModel.from_pretrained(model_name)
+        sd_hf = hf_model.state_dict()
+        sd_keys_hf = sd_hf.keys()
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # skip the bias parameter in the attention layer
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')]
+        # transformer.h.0.attn.c_attn.weight torch.Size([768, 2304])
+        # transformer.h.0.attn.c_proj.weight torch.Size([768, 768])
+        # transformer.h.0.mlp.c_fc.weight torch.Size([768, 3072])
+        # transformer.h.0.mlp.c_proj.weight torch.Size([3072, 768])
+        transposed_keys = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']        
+        # copy weights
+        for k in sd_keys_hf:
+            if any(k.endswith(tk) for tk in transposed_keys):
+                assert sd_hf[k].shape[::-1] == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k].T)
+            else:
+                assert sd_hf[k].shape == sd[k].shape, f"Shape mismatch for {k}: {sd_hf[k].shape} vs {sd[k].shape}"
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k])
+        
+        return model
+
+
+if __name__ == "__main__":
+    model = GPT2.from_pretrained('gpt2')
+    print("Lalaland")
+    model.eval()
+    model.to('cuda')
+
+    num_return_sequences = 5
+    max_new_tokens = 30
+
+    # tokenizer
+    import tiktoken
+    enc = tiktoken.get_encoding('gpt2')
+    prompt = "Hello, I'm a language model"
+    tokens = enc.encode(prompt)
+    tokens = torch.tensor(tokens)
+    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1).to('cuda') # (num_return_sequences, T)
+    x = tokens.to('cuda')
+
+    # generate
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    for _ in range(max_new_tokens):
+        with torch.no_grad():
+            logits = model(x)
+            logits = logits[:, -1, :] # (num_return_sequences, vocab_size)
+            probs = F.softmax(logits, dim=-1) # (num_return_sequences, vocab_size)
+            top_k_probs, top_k_indices = torch.topk(probs, 50, dim=-1)
+            selected_indices = torch.multinomial(top_k_probs, num_samples=1)
+            next_tokens = torch.gather(top_k_indices, dim=-1, index=selected_indices)
+            x = torch.cat([x, next_tokens], dim=1)
+    
+    for i in range(num_return_sequences):
+        tokens = x[i, :max_new_tokens].tolist()
+        decoded = enc.decode(tokens)
+        print(f"{i}: {decoded}")
+    
+    
