@@ -10,7 +10,8 @@ class GPT2Config:
     Configuration for GPT-2 model.
     Note this is the 124M parameter version (not 1.5B).
     """
-    vocab_size: int = 50257 # GPT-2 vocabulary size: 50000 BPE tokens + 256 bytes tokens + 1 <\endoftext> token
+    # vocab_size: int = 50257 # GPT-2 vocabulary size: 50000 BPE tokens + 256 bytes tokens + 1 <\endoftext> token
+    vocab_size: int = 50304 # round up to nearest multiple of 128
     block_size: int = 1024 # max sequence length
     n_layer: int = 12 # number of transformer blocks
     n_head: int = 12 # number of attention heads
