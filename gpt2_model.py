@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+import time
 
 @dataclass
 class GPT2Config:
@@ -59,6 +60,7 @@ class MLP(nn.Module):
         self.config = config
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         # self.dropout = nn.Dropout(config.dropout)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -97,8 +99,26 @@ class GPT2(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # weight tying with wte
-        self.lm_head.weight = self.transformer.wte.weight
-        
+        # self.lm_head.weight = self.transformer.wte.weight 
+        # TODO: why this will cause error? answer: init value mismatch (see README.md)
+        # output: Hello, I'm a language model model model model ...
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # init weights
+        self.apply(self.__init_weights)
+    
+    # 1/sqrt(768) = 0.036
+    # TODO: what if use xavier init insead?
+    def __init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std = (2 * self.config.n_layer) ** -0.5 # 2 residual connections per transformer block
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx: torch.Tensor, targets: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass"""
@@ -112,7 +132,10 @@ class GPT2(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x) # (B, T, C)
         logits = self.lm_head(x) # (B, T, vocab_size)
-        return logits
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_name: str) -> 'GPT2':
@@ -162,12 +185,97 @@ class GPT2(nn.Module):
         
         return model
 
+import tiktoken
+
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        with open('input.txt', 'r') as f:
+            text = f.read()
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"Loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B*T)} batches")
+        print(f"1 epoch = {len(self.tokens) // (B*T) * B * T} tokens")
+
+        self.current_pos = 0
+
+    def next_batch(self):
+        """Get the next batch of data"""
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_pos:self.current_pos+B*T+1]
+        x = buf[:-1].view(B, T)
+        y = buf[1:].view(B, T)
+        self.current_pos += B*T
+        if self.current_pos + B*T >= len(self.tokens):
+            self.current_pos = 0
+        return x, y
+
 
 if __name__ == "__main__":
-    model = GPT2.from_pretrained('gpt2')
-    print("Lalaland")
+
+    # device check
+    if torch.cuda.is_available():
+        device = 'cuda'
+    else:
+        device = 'cpu'
+    print(f"Using device: {device}")
+
+    # get a data batch
+    # import tiktoken
+    # enc = tiktoken.get_encoding('gpt2')
+    # with open('input.txt', 'r') as f:
+    #     text = f.read()
+    # tokens = enc.encode(text)
+    # B, T = 4, 32
+    # tokens = torch.tensor(tokens[:B*T+1])
+    # tokens = tokens.to(device)
+    # x = tokens[:-1].view(B, T)
+    # y = tokens[1:].view(B, T)
+
+    # init data loader
+    # train_loader = DataLoaderLite(B=4, T=32)
+    train_loader = DataLoaderLite(B=8, T=1024)
+
+    # torch.set_float32_matmul_precision('high')
+
+    # init model
+    model = GPT2(GPT2Config())
+    model.to(device)
+    # logits, loss = model(x, y)
+    # print(loss)
+    # model = torch.compile(model)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for i in range(50):
+        t0 = time.time()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device) 
+        optimizer.zero_grad() # MUST clear gradients from previous step (default is to accumulate)
+        # with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
+        # import code; code.interact(local=locals())
+        loss.backward() # compute gradients
+        optimizer.step() # update weights
+        end.record()
+        torch.cuda.synchronize()
+        t1 = time.time()
+        dt = (t1 - t0) * 1000 # ms
+        dt_event = start.elapsed_time(end) # ms
+        tokens_per_sec = train_loader.B * train_loader.T / (t1 - t0)
+        print(f"step {i}, loss: {loss.item()}, time: {dt:.2f} ms, event time: {dt_event:.2f} ms, tokens/sec: {tokens_per_sec:.2f}")
+
+    exit(0)
+
+    # model = GPT2.from_pretrained('gpt2')
+    model = GPT2(GPT2Config())
     model.eval()
-    model.to('cuda')
+    model.to(device)
 
     num_return_sequences = 5
     max_new_tokens = 30
@@ -178,10 +286,10 @@ if __name__ == "__main__":
     prompt = "Hello, I'm a language model"
     tokens = enc.encode(prompt)
     tokens = torch.tensor(tokens)
-    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1).to('cuda') # (num_return_sequences, T)
-    x = tokens.to('cuda')
+    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1).to(device) # (num_return_sequences, T)
+    x = tokens.to(device)
 
-    # generate
+    # generate - autoregressive
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     for _ in range(max_new_tokens):
@@ -197,6 +305,6 @@ if __name__ == "__main__":
     for i in range(num_return_sequences):
         tokens = x[i, :max_new_tokens].tolist()
         decoded = enc.decode(tokens)
-        print(f"{i}: {decoded}")
+        print(f">{i}: {decoded}")
     
     
