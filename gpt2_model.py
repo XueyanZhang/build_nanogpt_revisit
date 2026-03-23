@@ -239,7 +239,7 @@ if __name__ == "__main__":
     # train_loader = DataLoaderLite(B=4, T=32)
     train_loader = DataLoaderLite(B=8, T=1024)
 
-    torch.set_float32_matmul_precision('high')
+    # torch.set_float32_matmul_precision('high')
 
     # init model
     model = GPT2(GPT2Config())
@@ -257,8 +257,8 @@ if __name__ == "__main__":
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device) 
         optimizer.zero_grad() # MUST clear gradients from previous step (default is to accumulate)
-        # with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
         # import code; code.interact(local=locals())
         loss.backward() # compute gradients
         optimizer.step() # update weights
