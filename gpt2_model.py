@@ -40,13 +40,15 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.config.n_head, head_dim).transpose(1, 2)
         v = v.view(B, T, self.config.n_head, head_dim).transpose(1, 2)
         # S = QK^T / sqrt(d_k)
-        attn = (q @ k.transpose(-2, -1)) * (head_dim ** -0.5) # (B, n_head, T, T)
-        # causal mask : cannot look into the future tokens
-        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # (B, n_head, T, T)
-        # P = softmax(S)
-        attn = F.softmax(attn, dim=-1) # (B, n_head, T, T)
-        # O = PV
-        out = attn @ v # (B, n_head, T, head_dim)
+        # attn = (q @ k.transpose(-2, -1)) * (head_dim ** -0.5) # (B, n_head, T, T)
+        # # causal mask : cannot look into the future tokens
+        # attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf')) # (B, n_head, T, T)
+        # # P = softmax(S)
+        # attn = F.softmax(attn, dim=-1) # (B, n_head, T, T)
+        # # O = PV
+        # out = attn @ v # (B, n_head, T, head_dim)
+        # Flash Attention
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # concatenate heads
         out = out.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C) concat
         # output projection
