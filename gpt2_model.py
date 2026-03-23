@@ -246,7 +246,7 @@ if __name__ == "__main__":
     model.to(device)
     # logits, loss = model(x, y)
     # print(loss)
-    # model = torch.compile(model)
+    model = torch.compile(model)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     for i in range(50):
