@@ -239,7 +239,7 @@ if __name__ == "__main__":
     # train_loader = DataLoaderLite(B=4, T=32)
     train_loader = DataLoaderLite(B=8, T=1024)
 
-    # torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision('high')
 
     # init model
     model = GPT2(GPT2Config())
