@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 import time
+import math
 
 @dataclass
 class GPT2Config:
@@ -185,8 +186,32 @@ class GPT2(nn.Module):
                 assert sd_hf[k].shape == sd[k].shape, f"Shape mismatch for {k}: {sd_hf[k].shape} vs {sd[k].shape}"
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
-        
         return model
+
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        """Configure the optimizer"""
+        # all parameters in the model
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # parameters that require gradients
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # parameters with weight decay
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        # parameters without weight decay
+        no_decay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_no_decay_params = sum(p.numel() for p in no_decay_params)
+        print(f"Number of parameters with weight decay: {len(decay_params)}, with {num_decay_params,:} params")
+        print(f"Number of parameters without weight decay: {len(no_decay_params)}, with {num_no_decay_params,:} params")
+        # create optimizer
+        # fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        # print(f"Fused AdamW available: {fused_available}")
+        # used_fused = fused_available and device == 'cuda'
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=(device == 'cuda'))
+        return optimizer
 
 import tiktoken
 
@@ -212,7 +237,7 @@ class DataLoaderLite:
         x = buf[:-1].view(B, T)
         y = buf[1:].view(B, T)
         self.current_pos += B*T
-        if self.current_pos + B*T >= len(self.tokens):
+        if self.current_pos + B*T+1 >= len(self.tokens):
             self.current_pos = 0
         return x, y
 
@@ -251,7 +276,27 @@ if __name__ == "__main__":
     # print(loss)
     model = torch.compile(model)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    # learning rate scheduler: cosine decay with warmup
+    max_lr = 6e-4
+    min_lr = max_lr * 0.1
+    warmup_steps = 10
+    max_steps = 50
+    def get_lr(it):
+        # 1) linear warmup
+        if it < warmup_steps:
+            return max_lr * (it+1) / warmup_steps
+        # 2) if it > max_steps, return min_lr
+        if it > max_steps:
+            return min_lr
+        # 3) cosine decay between warmup_steps and max_steps down to min_lr
+        decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = .5 * (1 + math.cos(math.pi * decay_ratio))
+        return min_lr + (max_lr - min_lr) * coeff
+    
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
+    
     for i in range(50):
         t0 = time.time()
         start = torch.cuda.Event(enable_timing=True)
@@ -264,6 +309,12 @@ if __name__ == "__main__":
             logits, loss = model(x, y)
         # import code; code.interact(local=locals())
         loss.backward() # compute gradients
+        # gradient clipping: prevents exploding gradients
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # update learning rate
+        lr = get_lr(i)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         optimizer.step() # update weights
         end.record()
         torch.cuda.synchronize()
@@ -271,7 +322,7 @@ if __name__ == "__main__":
         dt = (t1 - t0) * 1000 # ms
         dt_event = start.elapsed_time(end) # ms
         tokens_per_sec = train_loader.B * train_loader.T / (t1 - t0)
-        print(f"step {i}, loss: {loss.item()}, time: {dt:.2f} ms, event time: {dt_event:.2f} ms, tokens/sec: {tokens_per_sec:.2f}")
+        print(f"step {i}, loss: {loss.item():.4f}, norm: {norm.item():.4f}, lr: {lr:.2e}, time: {dt:.2f} ms, event time: {dt_event:.2f} ms, tokens/sec: {tokens_per_sec:.2f}")
 
     exit(0)
 
