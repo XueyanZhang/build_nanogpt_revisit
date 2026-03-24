@@ -378,15 +378,25 @@ if __name__ == "__main__":
     
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=max_lr, device=device)
+
+    # log dir
+    log_dir = 'logs'
+    if master_process:
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'training.log')
+        with open(log_file, 'w') as f:
+            pass
+            # f.write('step,val_loss,train_loss,lr,time,tokens_per_sec\n')
     
     for step in range(max_steps):
         t0 = time.time()
+        last_step = (step == max_steps - 1)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
 
         # evaluating
-        if step % 100 == 0:
+        if step % 256 == 0 or last_step:
             model.eval()
             val_loader.reset()
             with torch.no_grad():
@@ -397,11 +407,26 @@ if __name__ == "__main__":
                     x, y = x.to(device), y.to(device)
                     with torch.autocast(device_type=device, dtype=torch.bfloat16):
                         logits, loss = model(x, y)
+                    loss = loss / val_loss_steps
                     val_loss_accum += loss.detach()
             if ddp:
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
-                print(f"step {step:5d}, val loss: {val_loss_accum.item():.4f}")
+                print(f"validation loss: step {step:5d}, val loss: {val_loss_accum.item():.4f}")
+                with open(log_file, 'a') as f:
+                    f.write(f"{step} val,{val_loss_accum.item():.4f}\n")
+                # save checkpoint
+                if step > 0 and (step % 5000 == 0 or last_step):
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'step': step,
+                        'val_loss': val_loss_accum.item(),
+                    }
+                    if ddp:
+                        checkpoint['model'] = raw_model.module.state_dict()
+                    torch.save(checkpoint, os.path.join(log_dir, f'ckpt.{step:05d}.pt'))
+
 
         # training
         model.train()
@@ -435,6 +460,8 @@ if __name__ == "__main__":
         tokens_per_sec = tokens_process / (t1 - t0)
         if master_process:
             print(f"step {step:5d}, loss: {loss_accum.item():.4f}, norm: {norm.item():.4f}, lr: {lr:.2e}, time: {dt:.2f} ms, tokens/sec: {tokens_per_sec:.2f}")
+            with open(log_file, 'a') as f:
+                f.write(f"{step} train,{loss_accum.item():.4f}\n")
 
     if ddp:
         destroy_process_group()
