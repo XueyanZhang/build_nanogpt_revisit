@@ -423,8 +423,6 @@ if __name__ == "__main__":
                         'step': step,
                         'val_loss': val_loss_accum.item(),
                     }
-                    if ddp:
-                        checkpoint['model'] = raw_model.module.state_dict()
                     torch.save(checkpoint, os.path.join(log_dir, f'ckpt.{step:05d}.pt'))
 
 
