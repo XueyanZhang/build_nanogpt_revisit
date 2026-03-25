@@ -416,7 +416,7 @@ if __name__ == "__main__":
                 with open(log_file, 'a') as f:
                     f.write(f"{step} val,{val_loss_accum.item():.4f}\n")
                 # save checkpoint
-                if step > 0 and (step % 5000 == 0 or last_step):
+                if step > 0 and (step % 5120 == 0 or last_step):
                     checkpoint = {
                         'model': raw_model.state_dict(),
                         'optimizer': optimizer.state_dict(),

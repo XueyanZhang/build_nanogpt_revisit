@@ -85,5 +85,32 @@ self.transformer.wte.weight = self.lm_head.weight
 
 ## Reference
 
+### General / GPT-2
 - [NanoGPT](https://github.com/karpathy/nanogpt)
 - [Video](https://www.youtube.com/watch?v=l8pRSuU81PU)
+- [OpenAI Community GPT-2 (HuggingFace)](https://huggingface.co/openai-community/gpt2)
+- [Better Language Models (OpenAI)](https://openai.com/index/better-language-models/)
+- [Language Models are Unsupervised Multitask Learners (PDF)](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)
+- [OpenAI GPT-2 GitHub Repo](https://github.com/openai/gpt-2)
+
+### Tokenizer
+- [Tiktokenizer](https://tiktokenizer.chatgptcn.com/)
+
+### HuggingFace Implementations
+- [GPT-2 Modeling Source Code](https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py)
+- [GPT-2 Documentation](https://huggingface.co/docs/transformers/en/model_doc/gpt2?usage=Pipeline)
+
+### PyTorch & Optimizations
+- [torch.set_float32_matmul_precision](https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html)
+- [PyTorch AMP Recipe](https://docs.pytorch.org/tutorials/recipes/recipes/amp_recipe.html)
+- [PyTorch AMP Documentation](https://docs.pytorch.org/docs/stable/amp.html)
+- [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/pdf/2205.14135)
+
+### Hardware Architecture
+- [NVIDIA Ampere Architecture Whitepaper](https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf)
+- [NVIDIA Ada Architecture Whitepaper](https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf)
+
+### Datasets
+- [FineWeb-v1 Blogpost](https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1)
+- [FineWeb Dataset (HuggingFace)](https://huggingface.co/datasets/HuggingFaceFW/fineweb)
+
